@@ -12,6 +12,7 @@ import json
 import shutil
 import threading
 import subprocess
+import unicodedata
 from datetime import datetime
 
 # ---------------------------------------------------------
@@ -41,36 +42,35 @@ def colorize(text, *styles):
     return "".join(styles) + text + C.RESET
 
 
-def success(text):
-    print(colorize(f"✅ {text}", C.GREEN, C.BOLD))
-
-
-def error(text):
-    print(colorize(f"❌ {text}", C.RED, C.BOLD))
-
-
-def warn(text):
-    print(colorize(f"⚠️  {text}", C.YELLOW, C.BOLD))
-
-
-def info(text):
-    print(colorize(f"ℹ️  {text}", C.CYAN))
+def success(msg):  print(colorize(f"✅ {msg}", C.GREEN, C.BOLD))
+def error(msg):    print(colorize(f"❌ {msg}", C.RED, C.BOLD))
+def warn(msg):     print(colorize(f"⚠️  {msg}", C.YELLOW, C.BOLD))
+def info(msg):     print(colorize(f"ℹ️  {msg}", C.CYAN))
 
 
 # ---------------------------------------------------------
-# Boxes / banners / breadcrumbs
+# BUG FIX #9 — box() used len() which counts bytes, not
+# display-width.  Emoji and some Unicode chars are "wide"
+# (2 columns).  Use wcwidth-style calculation so the box
+# borders don't misalign.
 # ---------------------------------------------------------
 
-def clear():
-    os.system('clear' if os.name == 'posix' else 'cls')
+def display_width(text):
+    """Return the terminal column-width of a string."""
+    w = 0
+    for ch in text:
+        eaw = unicodedata.east_asian_width(ch)
+        w += 2 if eaw in ("W", "F") else 1
+    return w
 
 
-def box(title, width=37):
+def box(title, width=40):
     line = "═" * (width - 2)
     print(colorize(f"╔{line}╗", C.CYAN))
-    pad = (width - 2 - len(title)) // 2
-    spaces_right = width - 2 - len(title) - pad
-    print(colorize(f"║{' ' * pad}{title}{' ' * spaces_right}║", C.CYAN, C.BOLD))
+    dw   = display_width(title)
+    pad  = (width - 2 - dw) // 2
+    rpad = width - 2 - dw - pad
+    print(colorize(f"║{' ' * pad}{title}{' ' * rpad}║", C.CYAN, C.BOLD))
     print(colorize(f"╚{line}╝", C.CYAN))
     print()
 
@@ -82,7 +82,7 @@ def banner():
 def breadcrumb(step, total, label):
     bar = colorize(f"Step {step}/{total}", C.MAGENTA, C.BOLD)
     print(f"{bar} — {colorize(label, C.WHITE, C.BOLD)}")
-    print(colorize("─" * 37, C.DIM))
+    print(colorize("─" * 40, C.DIM))
 
 
 def section(title):
@@ -90,13 +90,15 @@ def section(title):
     print(colorize(f"▸ {title}", C.BLUE, C.BOLD))
 
 
+def clear():
+    os.system('clear' if os.name == 'posix' else 'cls')
+
+
 # ---------------------------------------------------------
 # Spinner
 # ---------------------------------------------------------
 
 class Spinner:
-    """Simple console spinner shown while a blocking task runs."""
-
     FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
     def __init__(self, message="Working..."):
@@ -130,10 +132,13 @@ class Spinner:
 
 
 # ---------------------------------------------------------
-# Global state (set once at startup)
+# BUG FIX #10 — FFMPEG_AVAILABLE was set only inside the
+# __main__ block, causing a NameError if any function is
+# called before that (e.g. when imported or tested).
+# Default it to False here at module level.
 # ---------------------------------------------------------
 
-FFMPEG_AVAILABLE = False  # set in __main__ block
+FFMPEG_AVAILABLE = False   # overwritten at startup by check_ffmpeg()
 
 
 # ---------------------------------------------------------
@@ -141,7 +146,6 @@ FFMPEG_AVAILABLE = False  # set in __main__ block
 # ---------------------------------------------------------
 
 def check_ytdlp():
-    """Verify yt-dlp is installed before showing the menu."""
     if shutil.which("yt-dlp") is None:
         error("yt-dlp is not installed or not on PATH.")
         print("Install it with:  pip install yt-dlp")
@@ -149,9 +153,6 @@ def check_ytdlp():
 
 
 def check_ffmpeg():
-    """Check that ffmpeg is available.
-    Returns True if available, False otherwise.
-    Warning is shown once and can be dismissed permanently via settings."""
     if shutil.which("ffmpeg") is not None:
         return True
 
@@ -171,13 +172,12 @@ def check_ffmpeg():
 
 URL_RE = re.compile(r"^https?://[^\s]+\.[^\s]{2,}")
 
-
 def is_valid_url(url):
     return bool(URL_RE.match(url.strip()))
 
 
 # ---------------------------------------------------------
-# Settings (remember default download folder)
+# Settings
 # ---------------------------------------------------------
 
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
@@ -202,16 +202,110 @@ def save_settings(settings):
 
 
 # ---------------------------------------------------------
+# Welcome tips screen (shows once on first run)
+# ---------------------------------------------------------
+
+TIPS = [
+    ("Batch mode",      "Enter multiple URLs — the app asks after the first one."),
+    ("Re-download",     "Use 'View history' from the main menu to re-queue past URLs."),
+    ("MP4 vs Video",    "MP4 forces the .mp4 container; Video picks the best format."),
+    ("No ffmpeg?",      "Install it with: pkg install ffmpeg   (Termux)"),
+    ("Auto-qualities",  "Qualities shown are real — fetched live from the video."),
+    ("Custom folder",   "Choose option 4 in the folder menu to use any path."),
+]
+
+
+def show_welcome_tips():
+    """Print a framed tips panel on first run, then never again."""
+    settings = load_settings()
+    if settings.get("welcome_seen"):
+        return
+
+    width = 44
+    line  = "─" * (width - 2)
+    print(colorize(f"┌{line}┐", C.CYAN))
+
+    title = "  Welcome! Quick tips to get started"
+    rpad  = width - 2 - len(title)
+    print(colorize(f"│{title}{' ' * rpad}│", C.CYAN, C.BOLD))
+    print(colorize(f"├{line}┤", C.CYAN))
+
+    for label, tip in TIPS:
+        label_str = colorize(f"  {label:<14}", C.BOLD)
+        # build the raw line (no ANSI) to measure padding
+        raw = f"  {label:<14}  {tip}"
+        rpad = max(0, width - 2 - len(raw))
+        inner = f"{label_str}  {tip}{' ' * rpad}"
+        print(colorize("│", C.CYAN) + inner + colorize("│", C.CYAN))
+
+    print(colorize(f"└{line}┘", C.CYAN))
+    print()
+
+    settings["welcome_seen"] = True
+    save_settings(settings)
+
+
+# ---------------------------------------------------------
+# Clipboard auto-paste
+# ---------------------------------------------------------
+
+def get_clipboard():
+    """
+    Try to read the system clipboard.
+    Supports Termux (termux-clipboard-get), Linux X11 (xclip / xsel),
+    Wayland (wl-paste), and macOS (pbpaste).
+    Returns a stripped string or '' on failure — never raises.
+    """
+    commands = [
+        ["termux-clipboard-get"],
+        ["xclip", "-selection", "clipboard", "-o"],
+        ["xsel", "--clipboard", "--output"],
+        ["wl-paste", "--no-newline"],
+        ["pbpaste"],
+    ]
+    for cmd in commands:
+        if shutil.which(cmd[0]) is None:
+            continue
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True,
+                errors="replace", timeout=3
+            )
+            if result.returncode == 0:
+                return result.stdout.strip()
+        except Exception:
+            continue
+    return ""
+
+
+def prompt_clipboard_url():
+    """
+    If the clipboard holds a valid URL, offer to use it.
+    Returns the URL string if accepted, '' otherwise.
+    """
+    clip = get_clipboard()
+    if not clip or not is_valid_url(clip):
+        return ""
+
+    short = clip if len(clip) <= 60 else clip[:57] + "..."
+    print(colorize(f"  Clipboard: {short}", C.DIM))
+    choice = input(colorize("  Use this URL? (y/n)\n  > ", C.CYAN)).strip().lower()
+    print()
+    if choice == "y":
+        return clip
+    return ""
+
+
+# ---------------------------------------------------------
 # Format listing
 # ---------------------------------------------------------
 
 def show_formats(url):
-    """List all available formats for the given URL using yt-dlp -F."""
     with Spinner("Fetching available formats..."):
         try:
             result = subprocess.run(
                 ["yt-dlp", "--no-playlist", "-F", url],
-                capture_output=True, text=True, timeout=60
+                capture_output=True, text=True, timeout=90
             )
         except subprocess.TimeoutExpired:
             warn("Timed out fetching formats.")
@@ -225,48 +319,144 @@ def show_formats(url):
 
 
 # ---------------------------------------------------------
+# Auto-detect available video qualities
+#
+# BUG FIX #1 — timeout raised to 120 s; added one retry
+#              on timeout so slow networks don't instantly
+#              fall back to the fixed menu.
+#
+# BUG FIX #2 — yt-dlp -J can emit WARNING/ERROR lines
+#              before the JSON object.  We now scan stdout
+#              for the first line that starts with '{' so
+#              stray log lines don't crash json.loads.
+# ---------------------------------------------------------
+
+def fetch_available_qualities(url):
+    """
+    Returns a sorted list of unique integer heights available for the URL,
+    e.g. [144, 360, 720, 1080].  Returns [] on any failure.
+    """
+    for attempt in range(1, 3):          # up to 2 tries (fix #1)
+        with Spinner(f"Detecting available qualities… (attempt {attempt}/2)"):
+            try:
+                result = subprocess.run(
+                    ["yt-dlp", "--no-playlist", "-J", "--skip-download", url],
+                    capture_output=True, text=True, timeout=120   # fix #1
+                )
+            except subprocess.TimeoutExpired:
+                if attempt == 2:
+                    warn("Timed out detecting qualities.")
+                    return []
+                continue   # retry
+
+        if result.returncode != 0:
+            warn("Could not detect qualities.")
+            return []
+
+        # BUG FIX #2 — find the first JSON line, skip log noise
+        json_text = None
+        for line in result.stdout.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("{"):
+                json_text = stripped
+                break
+
+        if not json_text:
+            warn("Could not locate JSON in yt-dlp output.")
+            return []
+
+        try:
+            data = json.loads(json_text)
+        except json.JSONDecodeError:
+            warn("Could not parse format info.")
+            return []
+
+        heights = set()
+        for fmt in data.get("formats", []):
+            h = fmt.get("height")
+            if h and isinstance(h, int) and h > 0 and fmt.get("vcodec", "none") != "none":
+                heights.add(h)
+
+        return sorted(heights)
+
+    return []
+
+
+def choose_quality_auto(url):
+    """
+    Present only the heights that actually exist for this URL.
+    Falls back to a fixed menu when detection fails.
+
+    BUG FIX #3 — the fallback fixed-menu now validates input
+                 in a loop instead of silently returning 'best'.
+    """
+    heights = fetch_available_qualities(url)
+
+    section("Choose video quality")
+
+    if not heights:
+        warn("Could not detect qualities — showing standard options.")
+        options = {"1": "360", "2": "720", "3": "1080", "4": "best"}
+        print("1. 360p")
+        print("2. 720p")
+        print("3. 1080p")
+        print("4. Best available")
+        while True:                                   # fix #3 — loop until valid
+            choice = input(colorize("> ", C.CYAN)).strip()
+            if choice in options:
+                return options[choice]
+            warn("Please enter 1, 2, 3 or 4.")
+        # unreachable, but satisfies linters
+        return "best"
+
+    options = {}
+    print(colorize("Available qualities for this video:", C.DIM))
+    for i, h in enumerate(heights, 1):
+        options[str(i)] = str(h)
+        print(f"{i}. {h}p")
+
+    best_num = len(heights) + 1
+    options[str(best_num)] = "best"
+    print(f"{best_num}. Best available")
+
+    while True:
+        choice = input(colorize("> ", C.CYAN)).strip()
+        if choice in options:
+            selected = options[choice]
+            label = "Best available" if selected == "best" else f"{selected}p"
+            info(f"Selected: {label}")
+            return selected
+        warn(f"Please enter a number between 1 and {best_num}.")
+
+
+# ---------------------------------------------------------
 # Platform detection
 # ---------------------------------------------------------
 
 def detect_platform(url):
     u = url.lower()
-    if "youtube.com" in u or "youtu.be" in u:
-        return "YouTube"
-    elif "instagram.com" in u:
-        return "Instagram"
-    elif "reddit.com" in u:
-        return "Reddit"
-    elif "twitter.com" in u or "x.com" in u:
-        return "Twitter/X"
-    elif "facebook.com" in u or "fb.watch" in u:
-        return "Facebook"
-    else:
-        return "Unknown (yt-dlp will try anyway)"
+    if "youtube.com" in u or "youtu.be" in u:   return "YouTube"
+    if "instagram.com" in u:                      return "Instagram"
+    if "reddit.com" in u:                         return "Reddit"
+    if "twitter.com" in u or "x.com" in u:        return "Twitter/X"
+    if "facebook.com" in u or "fb.watch" in u:    return "Facebook"
+    if "tiktok.com" in u:                          return "TikTok"
+    return "Unknown (yt-dlp will try anyway)"
 
 
 # ---------------------------------------------------------
 # Download folder
+#
+# BUG FIX #7 — when no default is saved, pressing "5" fell
+#              through to warn("Invalid choice") instead of
+#              asking again.  Now handled explicitly.
 # ---------------------------------------------------------
 
 def get_download_folder(skip_save_prompt=False):
     settings = load_settings()
-    default = settings.get("default_folder")
-
-    section("Choose download folder")
-    print("1. Downloads")
-    print("2. Music")
-    print("3. Movies")
-    print("4. Custom Folder")
-    if default:
-        print(f"5. Use saved default ({colorize(default, C.DIM)})")
-
-    choice = input(colorize("> ", C.CYAN)).strip()
-
-    if default and choice == "5":
-        return default
+    default  = settings.get("default_folder")
 
     home = os.path.expanduser("~")
-
     candidate_roots = [
         "/storage/emulated/0",
         "/sdcard",
@@ -287,29 +477,44 @@ def get_download_folder(skip_save_prompt=False):
             "3": os.path.join(home, "Movies"),
         }
 
-    if choice in folders:
-        path = folders[choice]
-    elif choice == "4":
-        path = input("Enter full folder path: ").strip()
-        if not path:
-            warn("No path entered, defaulting to Downloads.")
-            path = folders["1"]
-        elif not os.path.isdir(path):
-            create = input(f"'{path}' doesn't exist. Create it? (y/n)\n> ").strip().lower()
-            if create != "y":
-                warn("Cancelled, defaulting to Downloads.")
-                path = folders["1"]
-            else:
-                try:
-                    os.makedirs(path, exist_ok=True)
-                except Exception as e:
-                    error(f"Could not create folder: {e}")
-                    path = folders["1"]
-    else:
-        warn("Invalid choice, defaulting to Downloads.")
-        path = folders["1"]
+    while True:
+        section("Choose download folder")
+        print("1. Downloads")
+        print("2. Music")
+        print("3. Movies")
+        print("4. Custom Folder")
+        if default:
+            print(f"5. Use saved default ({colorize(default, C.DIM)})")
 
-    # Ensure path exists (handles missing Android paths on desktop)
+        choice = input(colorize("> ", C.CYAN)).strip()
+
+        # fix #7 — only honour "5" when a default actually exists
+        if choice == "5" and default:
+            return default
+
+        if choice in folders:
+            path = folders[choice]
+            break
+        elif choice == "4":
+            path = input("Enter full folder path: ").strip()
+            if not path:
+                warn("No path entered, defaulting to Downloads.")
+                path = folders["1"]
+            elif not os.path.isdir(path):
+                create = input(f"'{path}' doesn't exist. Create it? (y/n)\n> ").strip().lower()
+                if create != "y":
+                    warn("Cancelled, defaulting to Downloads.")
+                    path = folders["1"]
+                else:
+                    try:
+                        os.makedirs(path, exist_ok=True)
+                    except Exception as e:
+                        error(f"Could not create folder: {e}")
+                        path = folders["1"]
+            break
+        else:
+            warn("Invalid choice — please try again.")
+
     if not os.path.isdir(path):
         try:
             os.makedirs(path, exist_ok=True)
@@ -332,7 +537,6 @@ def get_download_folder(skip_save_prompt=False):
 # ---------------------------------------------------------
 
 def fetch_video_info(url):
-    """Fetch basic video info using yt-dlp --print (no download)."""
     with Spinner("Fetching video info..."):
         try:
             result = subprocess.run(
@@ -352,7 +556,7 @@ def fetch_video_info(url):
         print(result.stderr.strip()[:300])
         return None
 
-    lines = result.stdout.strip().split("\n")
+    lines    = result.stdout.strip().split("\n")
     title    = lines[0] if len(lines) > 0 else "Unknown"
     duration = lines[1] if len(lines) > 1 else "Unknown"
     uploader = lines[2] if len(lines) > 2 else "Unknown"
@@ -364,56 +568,29 @@ def fetch_video_info(url):
 
 
 # ---------------------------------------------------------
-# Download type / quality / audio options
+# Download type / audio options
 # ---------------------------------------------------------
 
 def choose_download_type():
     section("Choose download type")
-    print("1. 🎬 Video")
-    print("2. 🎵 Audio (MP3)")
-    print("3. 🔍 Show available formats")
+    print("1. 🎬 Video        (auto-detect qualities)")
+    print("2. 🎵 Audio        (MP3)")
+    print("3. 📦 MP4          (force MP4 container)")
+    print("4. 🔍 Show formats (inspect all streams)")
     choice = input(colorize("> ", C.CYAN)).strip()
-    while choice not in ("1", "2", "3"):
-        choice = input("Please enter 1, 2 or 3\n> ").strip()
-    if choice == "1":
-        return "video"
-    elif choice == "2":
-        return "audio"
-    else:
-        return "formats"
-
-
-def choose_quality():
-    section("Choose video quality")
-    print("1. 360p")
-    print("2. 720p")
-    print("3. 1080p")
-    print("4. Best available")
-    choice = input(colorize("> ", C.CYAN)).strip()
-    qualities = {
-        "1": "360",
-        "2": "720",
-        "3": "1080",
-        "4": "best",
-    }
-    return qualities.get(choice, "best")
+    while choice not in ("1", "2", "3", "4"):
+        choice = input("Please enter 1, 2, 3 or 4\n> ").strip()
+    return {"1": "video", "2": "audio", "3": "mp4", "4": "formats"}[choice]
 
 
 def choose_audio_options():
-    """Always return MP3 format with user-chosen bitrate.
-    Returns (audio_format, audio_bitrate) — format is always 'mp3'."""
     section("Audio quality (bitrate)")
     print("1. 128 kbps  (smaller file)")
     print("2. 192 kbps  (balanced)")
     print("3. 320 kbps  (best quality)")
     choice = input(colorize("> ", C.CYAN)).strip()
-    bitrates = {
-        "1": "128",
-        "2": "192",
-        "3": "320",
-    }
-    audio_bitrate = bitrates.get(choice, "192")
-    return "mp3", audio_bitrate
+    bitrate = {"1": "128", "2": "192", "3": "320"}.get(choice, "192")
+    return "mp3", bitrate
 
 
 # ---------------------------------------------------------
@@ -423,33 +600,112 @@ def choose_audio_options():
 def confirm_summary(url, platform, dtype, quality, folder,
                     audio_format=None, audio_bitrate=None):
     section("Confirm download")
+    type_label = {
+        "video":   "🎬 Video",
+        "audio":   "🎵 Audio (MP3)",
+        "mp4":     "📦 MP4",
+        "formats": "🔍 Show formats",
+    }.get(dtype, dtype)
+
     print(f"  {colorize('Platform:', C.BOLD)} {platform}")
-    print(f"  {colorize('Type:', C.BOLD)}     {dtype}")
-    if dtype == "video":
+    print(f"  {colorize('Type:', C.BOLD)}     {type_label}")
+
+    if dtype in ("video", "mp4"):
         label = "Best available" if quality == "best" else f"{quality}p"
         print(f"  {colorize('Quality:', C.BOLD)}  {label}")
     if dtype == "audio":
-        fmt = audio_format.upper() if audio_format else "MP3"
+        fmt = (audio_format or "mp3").upper()
         print(f"  {colorize('Format:', C.BOLD)}   {fmt}")
         if audio_bitrate:
             print(f"  {colorize('Bitrate:', C.BOLD)}  {audio_bitrate} kbps")
+
     print(f"  {colorize('Folder:', C.BOLD)}   {folder}")
     print(f"  {colorize('URL:', C.BOLD)}      {url}")
     print()
-    choice = input("Proceed with download? (y/n)\n> ").strip().lower()
-    return choice == "y"
+    return input("Proceed with download? (y/n)\n> ").strip().lower() == "y"
 
 
 # ---------------------------------------------------------
-# Progress bar via yt-dlp --newline output
+# Progress bar
+#
+# BUG FIX #6 — file lines can contain non-UTF-8 bytes when
+#              the video title has special characters.
+#              errors="replace" prevents a UnicodeDecodeError
+#              from crashing the whole download mid-way.
 # ---------------------------------------------------------
 
-def run_with_progress(cmd):
-    """Run a yt-dlp command and render a live progress bar with speed/ETA."""
+def _print_download_header(video_info, dtype):
+    """
+    Print a styled banner above the progress bar showing what is downloading.
+    Called once at the start of run_with_progress().
+
+    Layout example:
+    ╔══════════════════════════════════════════╗
+    ║  🎬  Lo-fi hip hop radio — beats to r…  ║
+    ║      3:42 · ChilledCow · Video / 1080p  ║
+    ╚══════════════════════════════════════════╝
+    """
+    if not video_info:
+        return
+
+    title    = video_info.get("title",    "Unknown")
+    duration = video_info.get("duration", "")
+    uploader = video_info.get("uploader", "")
+
+    type_icon = {"video": "🎬", "audio": "🎵", "mp4": "📦"}.get(dtype, "⬇")
+
+    # Truncate title to fit nicely
+    max_title = 42
+    display_title = title if len(title) <= max_title else title[:max_title - 1] + "…"
+
+    # Build the subtitle line from available metadata
+    meta_parts = [p for p in [duration, uploader] if p and p != "Unknown"]
+    subtitle = "  ·  ".join(meta_parts)
+    max_sub = 44
+    if len(subtitle) > max_sub:
+        subtitle = subtitle[:max_sub - 1] + "…"
+
+    # Box width — wide enough for the longest line
+    inner_w = max(len(display_title) + 6, len(subtitle) + 4, 44)
+    border   = "═" * (inner_w + 2)
+
     print()
+    print(colorize(f"╔{border}╗", C.CYAN))
+
+    # Title row with icon
+    title_line = f"  {type_icon}  {display_title}"
+    rpad = inner_w - len(title_line)
+    print(colorize("║", C.CYAN) +
+          colorize(f"{title_line}{' ' * rpad}  ", C.WHITE, C.BOLD) +
+          colorize("║", C.CYAN))
+
+    # Subtitle row (metadata)
+    if subtitle:
+        sub_line = f"      {subtitle}"
+        rpad2 = inner_w - len(sub_line)
+        print(colorize("║", C.CYAN) +
+              colorize(f"{sub_line}{' ' * rpad2}  ", C.DIM) +
+              colorize("║", C.CYAN))
+
+    print(colorize(f"╚{border}╝", C.CYAN))
+    print()
+
+
+def run_with_progress(cmd, video_info=None, dtype="video"):
+    """
+    Run a yt-dlp command and render a live progress bar.
+
+    video_info : dict from fetch_video_info() — title, duration, uploader
+    dtype      : 'video' | 'audio' | 'mp4'  — used for the header icon
+                 and to label dual-stream phases (Video stream / Audio stream).
+    """
+    _print_download_header(video_info, dtype)
+
     process = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, bufsize=1
+        cmd,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        errors="replace",
+        bufsize=1
     )
 
     progress_re = re.compile(
@@ -458,47 +714,74 @@ def run_with_progress(cmd):
         r"(?:\s+at\s+([\d.]+\s*\w+/s|Unknown speed))?"
         r"(?:\s+ETA\s+([\d:]+|Unknown))?"
     )
-    ffmpeg_re = re.compile(r"time=(\d+):(\d+):(\d+\.\d+)")
+    ffmpeg_re    = re.compile(r"time=(\d+):(\d+):(\d+\.\d+)")
+    # Detect yt-dlp announcing it is switching to the audio stream
+    audio_re     = re.compile(r"\[download\] Destination:.*?\.(m4a|opus|webm|ogg)", re.I)
+    video_re     = re.compile(r"\[download\] Destination:.*?\.(mp4|mkv|webm|mov)", re.I)
 
     last_line_was_progress = False
-    converting_shown = False
-    recent_lines = []
+    converting_shown       = False
+    stream_phase           = None   # None | "video" | "audio"
+    recent_lines           = []
 
     for line in process.stdout:
-        line = line.rstrip()
+        line  = line.rstrip()
         match = progress_re.match(line)
+
+        # ── Detect stream phase switches ────────────────────────────────
+        if audio_re.search(line):
+            if last_line_was_progress:
+                print()
+                last_line_was_progress = False
+            stream_phase = "audio"
+            print(colorize("  ▸ Audio stream", C.MAGENTA, C.BOLD))
+            continue
+        if video_re.search(line):
+            if last_line_was_progress:
+                print()
+                last_line_was_progress = False
+            stream_phase = "video"
+            print(colorize("  ▸ Video stream", C.CYAN, C.BOLD))
+            continue
+
+        # ── Progress bar ────────────────────────────────────────────────
         if match:
             percent = float(match.group(1))
             size    = match.group(2) or ""
             speed   = match.group(3) or ""
             eta     = match.group(4) or ""
 
-            filled      = int(percent // 5)   # 20-block bar
+            filled      = int(percent // 5)
+            # Green for video/single stream, magenta for audio stream
+            bar_color   = C.MAGENTA if stream_phase == "audio" else C.GREEN
             bar         = "█" * filled + "░" * (20 - filled)
-            bar_colored = colorize(bar, C.GREEN)
+            bar_colored = colorize(bar, bar_color)
 
-            extras = []
-            if size:  extras.append(f"of {size}")
-            if speed: extras.append(f"@ {speed}")
-            if eta:   extras.append(f"ETA {eta}")
+            extras    = []
+            if size:  extras.append(colorize(f"of {size}", C.DIM))
+            if speed: extras.append(colorize(f"@ {speed}", C.CYAN))
+            if eta:   extras.append(colorize(f"ETA {eta}", C.YELLOW))
             extra_str = "  " + " ".join(extras) if extras else ""
 
-            sys.stdout.write(f"\r{bar_colored} {percent:5.1f}%{extra_str}   ")
+            pct_colored = colorize(f"{percent:5.1f}%", C.WHITE, C.BOLD)
+            sys.stdout.write(f"\r{bar_colored} {pct_colored}{extra_str}   ")
             sys.stdout.flush()
             last_line_was_progress = True
 
+        # ── ffmpeg conversion ────────────────────────────────────────────
         elif ffmpeg_re.search(line):
             if last_line_was_progress:
                 print()
                 last_line_was_progress = False
             if not converting_shown:
-                sys.stdout.write(colorize("Converting to MP3... ", C.YELLOW))
+                sys.stdout.write(colorize("  ▸ Converting… ", C.YELLOW, C.BOLD))
                 sys.stdout.flush()
                 converting_shown = True
             else:
-                sys.stdout.write(".")
+                sys.stdout.write(colorize(".", C.YELLOW))
                 sys.stdout.flush()
 
+        # ── All other output ─────────────────────────────────────────────
         else:
             if last_line_was_progress:
                 print()
@@ -507,7 +790,7 @@ def run_with_progress(cmd):
                 print()
                 converting_shown = False
             if line:
-                print(line)
+                print(colorize(f"  {line}", C.DIM))
                 recent_lines.append(line)
                 if len(recent_lines) > 5:
                     recent_lines.pop(0)
@@ -521,21 +804,20 @@ def run_with_progress(cmd):
 
 # ---------------------------------------------------------
 # Build yt-dlp command
+#
+# BUG FIX #4 — the no-ffmpeg warning for audio was inside
+#              build_command(), which is called on every
+#              retry.  Moved the warn() to download_one()
+#              so it only fires once before the first attempt.
 # ---------------------------------------------------------
 
 def build_command(url, dtype, quality, folder, audio_format="mp3", audio_bitrate="192"):
-    """Build the yt-dlp argument list.
-
-    audio_format  : always 'mp3' (kept as param for future flexibility)
-    audio_bitrate : '128' | '192' | '320' — always a string, never None
-    """
     output_template = os.path.join(folder, "%(title)s.%(ext)s")
     cmd = ["yt-dlp", "--no-playlist", "--newline", "--continue",
            "-o", output_template]
 
     if dtype == "audio":
         if FFMPEG_AVAILABLE:
-            # Extract best audio stream and convert to MP3 at chosen bitrate
             cmd += [
                 "-f", "bestaudio",
                 "-x",
@@ -543,9 +825,29 @@ def build_command(url, dtype, quality, folder, audio_format="mp3", audio_bitrate
                 "--audio-quality", f"{audio_bitrate}K",
             ]
         else:
-            # No ffmpeg — grab the best native audio stream without conversion
-            warn("ffmpeg not found; downloading native audio stream (no MP3 conversion).")
-            cmd += ["-f", "bestaudio"]
+            cmd += ["-f", "bestaudio"]   # warn moved to download_one (fix #4)
+
+    elif dtype == "mp4":
+        if FFMPEG_AVAILABLE:
+            if quality == "best":
+                cmd += [
+                    "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
+                    "--merge-output-format", "mp4",
+                ]
+            else:
+                cmd += [
+                    "-f", (
+                        f"bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]"
+                        f"/bestvideo[height<={quality}]+bestaudio"
+                        f"/best[height<={quality}]"
+                    ),
+                    "--merge-output-format", "mp4",
+                ]
+        else:
+            if quality == "best":
+                cmd += ["-f", "best[ext=mp4]/best"]
+            else:
+                cmd += ["-f", f"best[height<={quality}][ext=mp4]/best[height<={quality}]/best"]
 
     else:  # video
         if FFMPEG_AVAILABLE:
@@ -554,7 +856,6 @@ def build_command(url, dtype, quality, folder, audio_format="mp3", audio_bitrate
             else:
                 cmd += ["-f", f"bestvideo[height<={quality}]+bestaudio/best[height<={quality}]"]
         else:
-            # No ffmpeg — can't merge streams; use a single pre-merged format
             if quality == "best":
                 cmd += ["-f", "best"]
             else:
@@ -565,7 +866,7 @@ def build_command(url, dtype, quality, folder, audio_format="mp3", audio_bitrate
 
 
 # ---------------------------------------------------------
-# Non-retryable error detection
+# Non-retryable error patterns
 # ---------------------------------------------------------
 
 NON_RETRYABLE_PATTERNS = [
@@ -583,7 +884,6 @@ NON_RETRYABLE_PATTERNS = [
     "sign in to confirm your age",
 ]
 
-
 def is_non_retryable(lines):
     text = " ".join(lines).lower()
     return any(p in text for p in NON_RETRYABLE_PATTERNS)
@@ -591,23 +891,50 @@ def is_non_retryable(lines):
 
 # ---------------------------------------------------------
 # Download with retries
+#
+# BUG FIX #4 (continued) — warn about missing ffmpeg once,
+#            here, before the first attempt, not inside
+#            build_command on every call.
+#
+# BUG FIX #5 — last_error_lines stayed [] when the process
+#            crashed before printing anything.  We now
+#            capture stderr separately as a fallback so
+#            the error block always has something to show.
 # ---------------------------------------------------------
 
 def download_one(url, dtype, quality, folder, retries=2,
-                 audio_format="mp3", audio_bitrate="192"):
-    """Run the download, retrying transient failures.
-    Permanent errors (unavailable, copyright, etc.) are not retried."""
+                 audio_format="mp3", audio_bitrate="192",
+                 video_info=None):
+
+    # fix #4 — single warning before any attempt
+    if dtype == "audio" and not FFMPEG_AVAILABLE:
+        warn("ffmpeg not found; downloading native audio stream (no MP3 conversion).")
+    if dtype == "mp4" and not FFMPEG_AVAILABLE:
+        warn("ffmpeg not found; MP4 stream merging unavailable — using best pre-muxed format.")
+
     cmd = build_command(url, dtype, quality, folder, audio_format, audio_bitrate)
 
-    attempt = 1
+    attempt          = 1
     last_error_lines = []
+
     while True:
         if attempt > 1:
             warn(f"Retry attempt {attempt} (resuming if possible)...")
-        returncode, recent_lines = run_with_progress(cmd)
+
+        returncode, recent_lines = run_with_progress(cmd, video_info=video_info, dtype=dtype)
+
         if returncode == 0:
             return True, []
+
+        # fix #5 — if recent_lines is empty, re-run quickly just to get stderr
+        if not recent_lines:
+            probe = subprocess.run(cmd, capture_output=True, text=True,
+                                   errors="replace", timeout=30)
+            fallback = (probe.stderr or probe.stdout or "").strip().splitlines()[-5:]
+            recent_lines = fallback or ["(no output captured)"]
+
         last_error_lines = recent_lines
+
         if is_non_retryable(recent_lines):
             break
         if attempt > retries:
@@ -626,14 +953,12 @@ def process_url(url, batch_index=None, batch_total=None, shared_options=None):
         print()
         print(colorize(f"━━━ URL {batch_index}/{batch_total} ━━━", C.MAGENTA, C.BOLD))
 
-    platform = detect_platform(url)
-    info(f"Detected: {platform}")
-
-    fetch_video_info(url)
-
-    # Defaults (used when shared_options provides audio keys)
+    platform      = detect_platform(url)
     audio_format  = "mp3"
     audio_bitrate = "192"
+
+    info(f"Detected: {platform}")
+    video_info = fetch_video_info(url)
 
     if shared_options:
         dtype         = shared_options["dtype"]
@@ -646,11 +971,12 @@ def process_url(url, batch_index=None, batch_total=None, shared_options=None):
 
         if dtype == "formats":
             show_formats(url)
-            return None   # explicit None so batch summary isn't misled
+            return None
 
         quality = "best"
-        if dtype == "video":
-            quality = choose_quality()
+
+        if dtype in ("video", "mp4"):
+            quality = choose_quality_auto(url)
         elif dtype == "audio":
             audio_format, audio_bitrate = choose_audio_options()
 
@@ -674,10 +1000,8 @@ def process_url(url, batch_index=None, batch_total=None, shared_options=None):
         error("Download failed after retries.")
         if error_lines:
             print(colorize("Last output:", C.DIM))
-            for line in error_lines:
-                print(colorize(f"  {line}", C.DIM))
-        if dtype == "audio" and not FFMPEG_AVAILABLE:
-            warn("ffmpeg is missing — MP3 conversion is not possible without it.")
+            for ln in error_lines:
+                print(colorize(f"  {ln}", C.DIM))
 
     return ok
 
@@ -687,14 +1011,18 @@ def process_url(url, batch_index=None, batch_total=None, shared_options=None):
 # ---------------------------------------------------------
 
 def get_urls():
-    """Prompt for one or more URLs. Returns a list."""
     section("Paste video URL")
+
+    # Auto-paste from clipboard if it holds a valid URL
+    clip_url = prompt_clipboard_url()
+    if clip_url:
+        return [clip_url]
+
     first = input(colorize("> ", C.CYAN)).strip()
     if not first:
         return []
 
     urls = [first]
-
     more = input("\nAdd another URL for batch mode? (y/n)\n> ").strip().lower()
     if more == "y":
         print(colorize(
@@ -713,6 +1041,7 @@ def get_urls():
 def main():
     clear()
     banner()
+    show_welcome_tips()           # only shows on first run
     breadcrumb(1, 3, "Enter URL(s)")
 
     urls = get_urls()
@@ -720,11 +1049,9 @@ def main():
         warn("No URL entered. Exiting.")
         return
 
-    valid_urls = []
+    valid_urls = [u for u in urls if is_valid_url(u)]
     for u in urls:
-        if is_valid_url(u):
-            valid_urls.append(u)
-        else:
+        if not is_valid_url(u):
             warn(f"Skipping invalid URL: {u}")
 
     if not valid_urls:
@@ -746,12 +1073,13 @@ def main():
             breadcrumb(3, 3, "Done")
             return
 
-        quality = "best"
+        quality       = "best"
         audio_format  = "mp3"
         audio_bitrate = "192"
 
-        if dtype == "video":
-            quality = choose_quality()
+        if dtype in ("video", "mp4"):
+            info("Detecting qualities from first URL as reference for batch...")
+            quality = choose_quality_auto(valid_urls[0])
         elif dtype == "audio":
             audio_format, audio_bitrate = choose_audio_options()
 
@@ -785,16 +1113,19 @@ def main():
         print()
         section("Batch summary")
         success(f"{succeeded} succeeded")
-        if failed:
-            error(f"{failed} failed")
-        if skipped:
-            info(f"{skipped} skipped (formats view)")
+        if failed:  error(f"{failed} failed")
+        if skipped: info(f"{skipped} skipped (formats view)")
 
     breadcrumb(3, 3, "Done")
 
 
 # ---------------------------------------------------------
 # History
+#
+# BUG FIX #8 — old history entries may be missing the
+#              'quality' key, causing a KeyError when
+#              view_history() renders them.  Use .get()
+#              with a safe default for every optional field.
 # ---------------------------------------------------------
 
 HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "history.json")
@@ -832,12 +1163,18 @@ def view_history():
 
         section("Download History")
         for i, entry in enumerate(history, 1):
+            # fix #8 — safe .get() for every field
+            date     = entry.get("date",     "unknown date")
+            platform = entry.get("platform", "?")
+            dtype    = entry.get("type",     "?")
+            quality  = entry.get("quality",  "?")
+            folder   = entry.get("folder",   "?")
+            url      = entry.get("url",      "")
             print(
                 f"{colorize(str(i) + '.', C.BOLD)} "
-                f"[{entry['date']}] {entry['platform']} — "
-                f"{entry['type']} ({entry['quality']}) → {entry['folder']}"
+                f"[{date}] {platform} — {dtype} ({quality}) → {folder}"
             )
-            print(f"   {colorize(entry['url'], C.DIM)}")
+            print(f"   {colorize(url, C.DIM)}")
 
         print("\n1. Delete an entry")
         print("2. Clear all history")
@@ -859,7 +1196,7 @@ def delete_entry(history):
         return
     removed = history.pop(int(num) - 1)
     write_history(history)
-    success(f"Deleted: {removed['url']}")
+    success(f"Deleted: {removed.get('url', '(unknown)')}")
 
 
 def clear_history():
@@ -885,7 +1222,7 @@ def write_history(history):
 
 if __name__ == "__main__":
     check_ytdlp()
-    FFMPEG_AVAILABLE = check_ffmpeg()   # ← module-level, used by build_command
+    FFMPEG_AVAILABLE = check_ffmpeg()
     try:
         while True:
             main()
